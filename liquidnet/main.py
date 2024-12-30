@@ -103,3 +103,95 @@ class LiquidNet(nn.Module):
         outputs = next_state
 
         return outputs, next_state
+
+    def _get_variables(self):
+        self.sensory_mu = nn.Parameter(
+            torch.rand(self._input_size, self._num_units) * 0.5 + 0.3
+        )
+        self.sensory_sigma = nn.Parameter(
+            torch.rand(self._input_size, self._num_units) * 5.0 + 3.0
+        )
+        self.sensory_W = nn.Parameter(
+            torch.Tensor(
+                np.random.uniform(
+                    low=self._w_init_min,
+                    high=self._w_init_max,
+                    size=[self._input_size, self._num_units],
+                )
+            )
+        )
+        sensory_erev_init = (
+            2 * np.random.randint(low=0, high=2, size=[self._input_size, self._num_units]) - 1
+        )
+        self.sensory_erev = nn.Parameter(
+            torch.Tensor(sensory_erev_init * self._erev_init_factor)
+        )
+        self.mu = nn.Parameter(torch.rand(self._num_units, self._num_units) * 0.5 + 0.3)
+        self.sigma = nn.Parameter(
+            torch.rand(self._num_units, self._num_units) * 5.0 + 3.0
+        )
+        self.W = nn.Parameter(
+            torch.Tensor(
+                np.random.uniform(
+                    low=self._w_init_min,
+                    high=self._w_init_max,
+                    size=[self._num_units, self._num_units],
+                )
+            )
+        )
+        erev_init = (
+            2 * np.random.randint(low=0, high=2, size=[self._num_units, self._num_units]) - 1
+        )
+        self.erev = nn.Parameter(torch.Tensor(erev_init * self._erev_init_factor))
+
+        if self._fix_vleak is None:
+            self.vleak = nn.Parameter(torch.rand(self._num_units) * 0.4 - 0.2)
+        else:
+            self.vleak = nn.Parameter(torch.Tensor(self._fix_vleak))
+        
+        if self._fix_gleak is None:
+            if self._gleak_init_max > self._gleak_init_min:
+                self.gleak = nn.Parameter(
+                    torch.rand(self._num_units)
+                    * (self._gleak_init_max - self._gleak_init_min)
+                    + self._gleak_init_min
+                )
+            else:
+                self.cm_t = nn.Parameter(
+                    torch.Tensor([self._cm_init_min] * self._num_units)
+                )
+        else:
+            self.cm_t = nn.Parameter(torch.Tensor(self._fix_cm))
+
+    
+    def _ode_step(self, inputs, state):
+        v_pre = state
+
+        sensory_w_activation = self.sensory_W * self._sigmoid(
+            inputs, self.sensory_mu, self.sensory_sigma
+        )
+        sensory_rev_activation = sensory_w_activation * self.sensory_erev
+
+        w_numerator_sensory = torch.sum(sensory_rev_activation, dim=1)
+        w_denominator_sensory = torch.sum(sensory_w_activation, dim=1)
+
+        for t in range(self._ode_solver_unfolds):
+            w_activation = self.W * self._sigmoid(v_pre, self.mu, self.sigma)
+            rev_activation = w_activation * self.erev
+
+            w_numerator = torch.sum(rev_activation, dim=1) + w_numerator_sensory
+            w_denominator = torch.sum(w_activation, dim=1) + w_denominator_sensory
+
+            numerator = self.cm_t * v_pre + self.gleak * self.vleak + w_numerator
+            denominator = self.cm_t + self.gleak + w_denominator
+
+            v_pre = numerator / denominator
+        
+        return v_pre
+
+    
+    def _sigmoid(self, v_pre, mu, sigma):
+        v_pre = v_pre.view(-1, v_pre.shape[-1], 1)
+        mues = v_pre - mu
+        x = sigma * mues
+        return torch.sigmoid(x)
