@@ -163,7 +163,6 @@ class LiquidNet(nn.Module):
         else:
             self.cm_t = nn.Parameter(torch.Tensor(self._fix_cm))
 
-    
     def _ode_step(self, inputs, state):
         v_pre = state
 
@@ -189,9 +188,128 @@ class LiquidNet(nn.Module):
         
         return v_pre
 
+    def _ode_step_explicit(self, inputs, state, _ode_solver_unfolds):
+        v_pre = state
+
+        sensory_w_activation = self.sensory_W * self._sigmoid(
+            inputs, self.sensory_mu, self.sensory_sigma
+        )
+
+        w_reduced_sensory = torch.sum(sensory_w_activation, dim=1)
+
+        for t in range(_ode_solver_unfolds):
+            w_activation = self.W * self._sigmoid(v_pre, self.mu, self.sigma)
+            w_reduced_synapse = torch.sum(w_activation, dim=1)
+            sensory_in = self.sensory_erev * sensory_w_activation
+            synapse_in = self.erev * w_activation
+            sum_in = (
+                torch.sum(sensory_in, dim=1)
+                - v_pre * w_reduced_synapse
+                + torch.sum(synapse_in, dim=1)
+                - v_pre * w_reduced_sensory
+            )
+            f_prime = 1 / self.cm_t * (self.gleak * (self.vleak - v_pre) + sum_in)
+            v_pre = v_pre + 0.1 * f_prime
+        
+        return v_pre
+    
+    def _ode_step_runge_kutta(self, inputs, state):
+        h = 0.1
+        for i in range(self._ode_solver_unfolds):
+            k1 = h * self._f_prime(inputs, state)
+            k2 = h * self._f_prime(inputs, state + k1 * 0.5)
+            k3 = h * self._f_prime(inputs, state + k2 * 0.5)
+            k4 = h * self._f_prime(inputs, state + k3)
+        
+            state = state + 1.0 / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
+        return state
     
     def _sigmoid(self, v_pre, mu, sigma):
         v_pre = v_pre.view(-1, v_pre.shape[-1], 1)
         mues = v_pre - mu
         x = sigma * mues
         return torch.sigmoid(x)
+    
+    def _f_prime(self, inputs, state): 
+        v_pre = state
+
+        sensory_w_activation = self.sensory_W * self._sigmoid(
+            inputs, self.sensory_mu, self.sensory_sigma
+        )
+        w_reduced_sensory = torch.sum(sensory_w_activation, dim=1)
+
+        for t in range(self._ode_solver_unfolds):
+            w_activation = self.W * self._sigmoid(v_pre, self.mu, self.sigma)
+
+            w_reduced_synapse = torch.sum(w_activation, dim=1)
+
+            sensory_in = self.sensory_erev * sensory_w_activation
+            synapse_in = self.erev * w_activation
+
+            sum_in = (
+                torch.sum(sensory_in, dim=1)
+                - v_pre * w_reduced_synapse
+                + torch.sum(synapse_in, dim=1)
+                - v_pre * w_reduced_sensory
+            )
+
+            f_prime = 1 / self.cm_t * (self.gleak * (self.vleak - v_pre) + sum_in)
+
+            v_pre = v_pre + 0.1 * f_prime
+        
+        return f_prime
+    
+    def get_param_constrain_op(self):
+        cm_clipping_op = torch.clamp(
+            self.cm_t, self._cm_t_min_value, self._cm_t_max_value
+        )
+        gleak_clipping_op = torch.clamp(
+            self.gleak, self._gleak_min_value, self._gleak_max_value
+        )
+        w_clipping_op = torch.clamp(self.W, self._w_min_value, self._w_max_value)
+        sensory_w_clipping_op = torch.clamp(
+            self.sensory_W, self._w_min_value, self._w_max_value
+        )
+
+        return [cm_clipping_op, gleak_clipping_op, w_clipping_op, sensory_w_clipping_op]
+    
+    def export_weights(self, dirname, output_weights=None):
+        os.makedirs(dirname, exist_ok=True)
+        w, erev, mu, sigma = (
+            self.W.data.cpu().numpy(),
+            self.erev.data.cpu().numpy(),
+            self.mu.data.cpu().numpy(),
+            self.sigma.data.cpu().numpy(),
+        )
+        sensory_w, sensory_erev, sensory_mu, sensory_sigma = (
+            self.sensory_W.data.cpu().numpy(),
+            self.sensory_erev.data.cpu().numpy(),
+            self.sensory_mu.data.cpu().numpy(),
+            self.sensory_sigma.data.cpu().numpy(),
+        )
+        vleak, gleak, cm = (
+            self.vleak.data.cpu().numpy(),
+            self.gleak.data.cpu().numpy(),
+            self.cm_t.data.cpu().numpy()
+        )
+
+        if output_weights is not None:
+            output_w, output_b = output_weights
+            np.savetxt(
+                os.path.join(dirname, "output_w.csv"), output_w.data.cpu().numpy()
+            )
+            np.savetxt(
+                os.path.join(dirname, "output_b.csv"), output_b.data.cpu().numpy()
+            )
+
+        np.savetxt(os.path.join(dirname, "w.csv"), w)
+        np.savetxt(os.path.join(dirname, "erev.csv"), erev)
+        np.savetxt(os.path.join(dirname, "mu.csv"), mu)
+        np.savetxt(os.path.join(dirname, "sigma.csv"), sigma)
+        np.savetxt(os.path.join(dirname, "sensory_w.csv"), sensory_w)
+        np.savetxt(os.path.join(dirname, "sensory_erev.csv"), sensory_erev)
+        np.savetxt(os.path.join(dirname, "sensory_mu.csv"), sensory_mu)
+        np.savetxt(os.path.join(dirname, "sensory_sigma.csv"), sensory_sigma)
+        np.savetxt(os.path.join(dirname, "vleak.csv"), vleak)
+        np.savetxt(os.path.join(dirname, "gleak.csv"), gleak)
+        np.savetxt(os.path.join(dirname, "cm.csv"), cm)
