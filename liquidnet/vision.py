@@ -4,6 +4,7 @@ from liquidnet.main import LiquidNet
 
 class VisionLiquidNet(nn.Module):
     def __init__(self, num_units, num_classes):
+        super(VisionLiquidNet, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=5, stride=1, padding=2)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=5, stride=1, padding=2)
